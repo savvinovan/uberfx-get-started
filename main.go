@@ -31,6 +31,9 @@ func main() {
 			),
 		),
 		fx.Invoke(func(server *http.Server) {}),
+		fx.Decorate(func(l *slog.Logger, c *Config) *slog.Logger {
+			return l.With(slog.String("app", c.Env))
+		}),
 	).Run()
 }
 
