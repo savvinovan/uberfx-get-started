@@ -20,30 +20,27 @@ func main() {
 		fx.WithLogger(func(log *slog.Logger) fxevent.Logger {
 			return &fxevent.SlogLogger{Logger: log}
 		}),
+		fx.Supply(&Config{Env: "development"}),
 		fx.Provide(
 			NewHTTPServer,
-			fx.Annotate(
-				NewEchoHandler,
-				fx.As(new(Route)),
-				fx.ResultTags(`name:"echo"`),
-			),
-			fx.Annotate(
-				NewHelloHandler,
-				fx.As(new(Route)),
-				fx.ResultTags(`name:"hello"`),
-			),
+			AsRoute(NewEchoHandler),
+			AsRoute(NewHelloHandler),
 			fx.Annotate(
 				NewServeMux,
-				fx.ParamTags("", `name:"echo"`, `name:"hello"`),
+				fx.ParamTags("", `group:"routes"`),
 			),
 		),
 		fx.Invoke(func(server *http.Server) {}),
 	).Run()
 }
 
+type Config struct {
+	Env string `json:"env"`
+}
+
 // NewHTTPServer builds an HTTP server that will begin serving requests
 // when the Fx application starts.
-func NewHTTPServer(lc fx.Lifecycle, mux *http.ServeMux) *http.Server {
+func NewHTTPServer(lc fx.Lifecycle, cfg *Config, mux *http.ServeMux) *http.Server {
 	srv := &http.Server{Addr: ":8098", Handler: mux}
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
@@ -51,8 +48,13 @@ func NewHTTPServer(lc fx.Lifecycle, mux *http.ServeMux) *http.Server {
 			if err != nil {
 				return err
 			}
-			fmt.Println("Starting HTTP server at", srv.Addr)
-			go srv.Serve(ln)
+			fmt.Println("Starting HTTP server at", srv.Addr, "in", cfg.Env, "mode")
+			go func() {
+				err := srv.Serve(ln)
+				if err != nil {
+					fmt.Println("HTTP server error:", err)
+				}
+			}()
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
@@ -79,7 +81,11 @@ func NewEchoHandler(l *slog.Logger) *EchoHandler {
 func (h *EchoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.log.Info("Handling request", slog.String("path", r.URL.Path))
 	if _, err := io.Copy(w, r.Body); err != nil {
-		fmt.Fprintln(os.Stderr, "Failed to handle request:", err)
+		_, err := fmt.Fprintln(os.Stderr, "Failed to handle request:", err)
+		if err != nil {
+			fmt.Println("Failed to write error:", err)
+		}
+
 	}
 }
 
@@ -89,7 +95,7 @@ func (h *EchoHandler) Pattern() string {
 
 // NewServeMux builds a ServeMux that will route requests
 // to the given EchoHandler.
-func NewServeMux(lc fx.Lifecycle, h1, h2 Route) *http.ServeMux {
+func NewServeMux(lc fx.Lifecycle, routes []Route) *http.ServeMux {
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
 			fmt.Println("starting mux")
@@ -101,8 +107,9 @@ func NewServeMux(lc fx.Lifecycle, h1, h2 Route) *http.ServeMux {
 		},
 	})
 	mux := http.NewServeMux()
-	mux.Handle(h1.Pattern(), h1)
-	mux.Handle(h2.Pattern(), h2)
+	for _, route := range routes {
+		mux.Handle(route.Pattern(), route)
+	}
 	return mux
 }
 
@@ -147,4 +154,14 @@ func (h *HelloHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+}
+
+// AsRoute annotates the given constructor to state that
+// it provides a route to the "routes" group.
+func AsRoute(f any) any {
+	return fx.Annotate(
+		f,
+		fx.As(new(Route)),
+		fx.ResultTags(`group:"routes"`),
+	)
 }
